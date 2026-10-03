@@ -1,6 +1,6 @@
 # RSA Solver
 
-A small educational command-line helper for RSA/CTF exercises involving deliberately weak RSA keys.
+An educational RSA security assessment toolkit for CTFs, cryptography labs, and authorized penetration tests. It combines bounded weak-key recovery with passive/low-impact checks for real-world RSA key-generation and parameter mistakes.
 
 It can:
 
@@ -11,7 +11,12 @@ It can:
 - show plaintext as integer, hex, bytes, and UTF-8 text when possible;
 - recognize and remove a valid RSAES-PKCS1-v1_5 encryption block;
 - inspect RSA values without pretending that ordinary strong RSA is practically factorable;
-- cancel cleanly instead of leaving an unbounded SymPy factorization running.
+- cancel cleanly instead of leaving an unbounded SymPy factorization running;
+- test Wiener's small-private-exponent weakness;
+- detect shared prime factors across multiple RSA moduli with pairwise GCD;
+- explicitly test close-prime/Fermat weakness;
+- analyze RSA public-key PEM files and X.509 certificates through OpenSSL;
+- batch-assess multiple moduli and separate observations from confirmed key-recovery findings.
 
 ## Install on Ubuntu
 
@@ -78,7 +83,7 @@ Displays modulus size and basic structural information. Inspection does not laun
 ```bash
 rsa-solver solve --n 3233 --e 17 --c 2790
 rsa-solver solve-pq --p 61 --q 53 --e 17 --c 2790
-rsa-solver inspect --n 3233 --e 17 --c 2790
+rsa-solver inspect --n 3233 --e 17 --c 2790\nrsa-solver wiener --n ... --e ...\nrsa-solver shared-gcd <n1> <n2> <n3>\nrsa-solver key public.pem\nrsa-solver cert server.crt\nrsa-solver batch <n1> <n2> <n3>
 ```
 
 For `solve`, the optional SymPy fallback defaults to 20 seconds:
@@ -113,4 +118,4 @@ The unit tests use small fixtures and do not perform expensive factorization.
 
 ## Scope
 
-This project is intended for cryptography education, CTFs, and authorized security labs. It is not a replacement for dedicated number-field-sieve factoring software.
+This project is intended for cryptography education, CTFs, and authorized security assessments. Public-key/certificate analysis is passive. Factoring and private-key recovery should only be used for keys that are explicitly in assessment scope.\n\nThe toolkit does not imply that correctly generated modern RSA is practically factorable. Its real-world value is detecting weak generation and configuration: undersized moduli, close primes, shared primes, unusually small private exponents, suspicious parameters, and recoverable challenge/test keys. It is not a replacement for dedicated number-field-sieve factoring software.
