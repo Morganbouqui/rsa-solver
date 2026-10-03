@@ -9,8 +9,9 @@ from __future__ import annotations
 import argparse
 import math
 import multiprocessing as mp
-import os
-import secrets
+import re
+import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -207,6 +208,156 @@ def factor_weak_modulus(
     return sympy_factor_with_timeout(n, sympy_timeout)
 
 
+
+def continued_fraction(numerator: int, denominator: int):
+    while denominator:
+        a = numerator // denominator
+        yield a
+        numerator, denominator = denominator, numerator - a * denominator
+
+
+def convergents(terms):
+    p2, p1, q2, q1 = 0, 1, 1, 0
+    for a in terms:
+        p, q = a * p1 + p2, a * q1 + q2
+        yield p, q
+        p2, p1, q2, q1 = p1, p, q1, q
+
+
+def wiener_attack(n: int, e: int) -> Optional[FactorResult]:
+    """Recover p and q when RSA uses an unusually small private exponent d."""
+    if n <= 0 or e <= 1:
+        return None
+    for k, d in convergents(continued_fraction(e, n)):
+        if k == 0 or d == 0:
+            continue
+        value = e * d - 1
+        if value % k:
+            continue
+        phi = value // k
+        s = n - phi + 1
+        disc = s * s - 4 * n
+        if disc < 0:
+            continue
+        root = math.isqrt(disc)
+        if root * root != disc or (s + root) % 2:
+            continue
+        p, q = (s + root) // 2, (s - root) // 2
+        if p > 1 and q > 1 and p * q == n:
+            return FactorResult(min(p, q), max(p, q), "Wiener small-d")
+    return None
+
+
+def shared_prime_gcd(moduli: list[int]) -> list[tuple[int, int, int]]:
+    """Find pairs of RSA moduli that share a non-trivial prime factor."""
+    findings = []
+    for i in range(len(moduli)):
+        for j in range(i + 1, len(moduli)):
+            g = math.gcd(moduli[i], moduli[j])
+            if 1 < g < moduli[i] and 1 < g < moduli[j]:
+                findings.append((i, j, g))
+    return findings
+
+
+def parse_moduli_text(value: str) -> list[int]:
+    return [parse_int(x) for x in re.split(r"[\\s,;]+", value.strip()) if x]
+
+
+def rsa_findings(n: int, e: Optional[int] = None) -> list[str]:
+    findings = []
+    bits = n.bit_length()
+    if bits < 2048:
+        findings.append(f"modulus is {bits} bits; review against the assessment key-size policy")
+    if n % 2 == 0:
+        findings.append("modulus is even and trivially factorable")
+    root = math.isqrt(n)
+    if root * root == n:
+        findings.append("modulus is a perfect square")
+    if e is not None:
+        if e <= 1 or e % 2 == 0:
+            findings.append("public exponent is structurally invalid or suspicious")
+        elif e == 3:
+            findings.append("e=3 detected; not a break by itself, but padding/construction requires review")
+        elif e not in (3, 17, 65537):
+            findings.append(f"uncommon public exponent e={e}; review rather than assuming vulnerability")
+    return findings
+
+
+def show_assessment(n: int, e: Optional[int] = None) -> None:
+    inspect_values(n, e)
+    observations = rsa_findings(n, e)
+    if observations:
+        print("\\nAssessment observations:")
+        for item in observations:
+            print(f"  - {item}")
+    else:
+        print("\\n[*] No basic parameter red flags detected.")
+    if e is not None:
+        result = wiener_attack(n, e)
+        if result:
+            print(f"[!] CONFIRMED weak private exponent ({result.method})")
+            print(f"[+] p = {result.p}")
+            print(f"[+] q = {result.q}")
+        else:
+            print("[*] Wiener small-d test: no recovery")
+
+
+def run_openssl(args: list[str]) -> str:
+    if shutil.which("openssl") is None:
+        raise RuntimeError("OpenSSL is required for PEM/certificate analysis")
+    proc = subprocess.run(
+        ["openssl", *args], check=False, capture_output=True, text=True, timeout=15
+    )
+    if proc.returncode != 0:
+        raise ValueError(proc.stderr.strip() or "OpenSSL could not parse the input")
+    return proc.stdout
+
+
+def parse_openssl_rsa_public(text: str) -> tuple[int, int]:
+    match = re.search(
+        r"Modulus:\\s*\\n(?P<body>(?:\\s*[0-9a-fA-F:]+\\s*\\n)+)\\s*Exponent:\\s*(?P<e>\\d+)",
+        text,
+        re.MULTILINE,
+    )
+    if not match:
+        raise ValueError("could not extract an RSA modulus/exponent from OpenSSL output")
+    hex_n = re.sub(r"[^0-9a-fA-F]", "", match.group("body"))
+    if hex_n.startswith("00"):
+        hex_n = hex_n[2:]
+    return int(hex_n, 16), int(match.group("e"))
+
+
+def analyze_key_file(path: str, certificate: bool = False) -> tuple[int, int]:
+    if certificate:
+        text = run_openssl(["x509", "-in", path, "-noout", "-text"])
+    else:
+        text = run_openssl(["pkey", "-pubin", "-in", path, "-text", "-noout"])
+    return parse_openssl_rsa_public(text)
+
+
+def interactive_shared_gcd() -> None:
+    print("\\nPaste decimal/0x moduli separated by spaces, commas, or semicolons.")
+    moduli = parse_moduli_text(input("moduli > "))
+    if len(moduli) < 2:
+        raise ValueError("provide at least two moduli")
+    findings = shared_prime_gcd(moduli)
+    if not findings:
+        print("[*] No shared prime factors found.")
+        return
+    for i, j, g in findings:
+        print(f"[!] CONFIRMED shared factor between n[{i}] and n[{j}]")
+        print(f"    gcd = {g}")
+        print(f"    n[{i}] other factor = {moduli[i] // g}")
+        print(f"    n[{j}] other factor = {moduli[j] // g}")
+
+
+def interactive_file_analysis(certificate: bool = False) -> None:
+    path = input("path > ").strip()
+    n, e = analyze_key_file(path, certificate)
+    print(f"[+] RSA modulus n : {n}")
+    print(f"[+] exponent e    : {e}")
+    show_assessment(n, e)
+
 def show_plaintext(result: dict) -> None:
     print(f"\n[+] Private exponent d : {result['d']}")
     print(f"[+] Plaintext integer  : {result['m']}")
@@ -287,7 +438,13 @@ def interactive() -> int:
         print("\n=== RSA CHALLENGE SOLVER ===\n")
         print("[1] Solve from n, e, c")
         print("[2] Solve from p, q, e, c")
-        print("[3] Inspect RSA values")
+        print("[3] Inspect / assess RSA values")
+        print("[4] Test Wiener weak-private-exponent attack")
+        print("[5] Test Fermat close-prime weakness")
+        print("[6] Test shared-prime GCD across moduli")
+        print("[7] Analyze RSA public key PEM")
+        print("[8] Analyze X.509 certificate RSA key")
+        print("[9] Batch-assess multiple RSA moduli")
         print("[0] Exit")
         choice = input("\nRSA > ").strip()
 
@@ -318,10 +475,48 @@ def interactive() -> int:
                 c = parse_int(raw_c) if raw_c else None
                 inspect_values(n, e, c)
                 input("\nPress Enter to return...")
+            elif choice == "4":
+                n = read_integer("n")
+                e = read_integer("e", 65537)
+                result = wiener_attack(n, e)
+                if result:
+                    print(f"[!] CONFIRMED: {result.method}")
+                    print(f"[+] p = {result.p}")
+                    print(f"[+] q = {result.q}")
+                else:
+                    print("[*] No Wiener-vulnerable small private exponent recovered.")
+                input("\\nPress Enter to return...")
+            elif choice == "5":
+                n = read_integer("n")
+                result = fermat_factor(n)
+                if result:
+                    print(f"[!] CONFIRMED close-prime factorization: p={result.p}, q={result.q}")
+                else:
+                    print("[*] No factors found within the bounded Fermat search.")
+                input("\\nPress Enter to return...")
+            elif choice == "6":
+                interactive_shared_gcd()
+                input("\\nPress Enter to return...")
+            elif choice == "7":
+                interactive_file_analysis(False)
+                input("\\nPress Enter to return...")
+            elif choice == "8":
+                interactive_file_analysis(True)
+                input("\\nPress Enter to return...")
+            elif choice == "9":
+                moduli = parse_moduli_text(input("moduli > "))
+                if not moduli:
+                    raise ValueError("provide at least one modulus")
+                for idx, modulus in enumerate(moduli):
+                    print(f"\\n--- n[{idx}] ---")
+                    show_assessment(modulus)
+                for i, j, g in shared_prime_gcd(moduli):
+                    print(f"[!] CONFIRMED shared factor n[{i}] / n[{j}]: {g}")
+                input("\\nPress Enter to return...")
             elif choice == "0":
                 return 0
             else:
-                print("[!] Choose 0, 1, 2, or 3.")
+                print("[!] Choose a menu option from 0 through 9.")
         except KeyboardInterrupt:
             print("\n[!] Cancelled. Returning to menu.")
         except (ValueError, OverflowError) as exc:
@@ -331,7 +526,7 @@ def interactive() -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rsa-solver",
-        description="Educational RSA/CTF solver for deliberately weak keys.",
+        description="Educational and authorized-assessment RSA security toolkit.",
     )
     parser.add_argument("--sympy-timeout", type=float, default=20.0,
                         help="seconds allowed for optional SymPy factoring (default: 20)")
@@ -352,6 +547,22 @@ def build_parser() -> argparse.ArgumentParser:
     ins.add_argument("--n", required=True, type=parse_int)
     ins.add_argument("--e", type=parse_int)
     ins.add_argument("--c", type=parse_int)
+
+    wie = sub.add_parser("wiener", help="test for an unusually small private exponent")
+    wie.add_argument("--n", required=True, type=parse_int)
+    wie.add_argument("--e", required=True, type=parse_int)
+
+    gcdp = sub.add_parser("shared-gcd", help="find shared prime factors across moduli")
+    gcdp.add_argument("moduli", nargs="+", type=parse_int)
+
+    key = sub.add_parser("key", help="analyze an RSA public key PEM")
+    key.add_argument("path")
+
+    cert = sub.add_parser("cert", help="analyze an X.509 certificate RSA key")
+    cert.add_argument("path")
+
+    batch = sub.add_parser("batch", help="batch-assess moduli and test shared factors")
+    batch.add_argument("moduli", nargs="+", type=parse_int)
     return parser
 
 
@@ -366,7 +577,41 @@ def main(argv=None) -> int:
             show_plaintext(result)
             return 0
         if args.command == "inspect":
-            inspect_values(args.n, args.e, args.c)
+            show_assessment(args.n, args.e)
+            if args.c is not None:
+                print(f"c      : {args.c}")
+                print(f"c < n  : {args.c < args.n}")
+            return 0
+        if args.command == "wiener":
+            result = wiener_attack(args.n, args.e)
+            if result:
+                print(f"[!] CONFIRMED: {result.method}")
+                print(f"[+] p = {result.p}")
+                print(f"[+] q = {result.q}")
+                return 0
+            print("[*] No Wiener-vulnerable small private exponent recovered.")
+            return 2
+        if args.command == "shared-gcd":
+            findings = shared_prime_gcd(args.moduli)
+            for i, j, g in findings:
+                print(f"[!] CONFIRMED shared factor n[{i}] / n[{j}]: {g}")
+            if not findings:
+                print("[*] No shared prime factors found.")
+            return 0 if findings else 2
+        if args.command == "key":
+            n, e = analyze_key_file(args.path, False)
+            show_assessment(n, e)
+            return 0
+        if args.command == "cert":
+            n, e = analyze_key_file(args.path, True)
+            show_assessment(n, e)
+            return 0
+        if args.command == "batch":
+            for idx, modulus in enumerate(args.moduli):
+                print(f"\\n--- n[{idx}] ---")
+                show_assessment(modulus)
+            for i, j, g in shared_prime_gcd(args.moduli):
+                print(f"[!] CONFIRMED shared factor n[{i}] / n[{j}]: {g}")
             return 0
         return interactive()
     except KeyboardInterrupt:
