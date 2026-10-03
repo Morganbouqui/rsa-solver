@@ -103,7 +103,7 @@ class RSASolverTests(unittest.TestCase):
         self.assertTrue(any("bits" in item for item in findings))
 
     def test_parse_openssl_rsa_public(self):
-        sample = "Public-Key: (16 bit)\\nModulus:\\n    00:ca:01\\nExponent: 65537 (0x10001)\\n"
+        sample = "Public-Key: (16 bit)\nModulus:\n    00:ca:01\nExponent: 65537 (0x10001)\n"
         n, e = rsa.parse_openssl_rsa_public(sample)
         self.assertEqual(n, 0xCA01)
         self.assertEqual(e, 65537)
