@@ -79,5 +79,35 @@ class RSASolverTests(unittest.TestCase):
             factor.assert_not_called()
 
 
+    def test_shared_prime_gcd(self):
+        moduli = [101 * 113, 101 * 127, 131 * 137]
+        self.assertIn((0, 1, 101), rsa.shared_prime_gcd(moduli))
+
+    def test_shared_prime_gcd_clean(self):
+        self.assertEqual(rsa.shared_prime_gcd([101 * 103, 107 * 109]), [])
+
+    def test_parse_moduli_text(self):
+        self.assertEqual(rsa.parse_moduli_text("15, 0x23;77"), [15, 35, 77])
+
+    def test_wiener_attack(self):
+        p, q, d = 1009, 1013, 5
+        n = p * q
+        phi = (p - 1) * (q - 1)
+        e = pow(d, -1, phi)
+        result = rsa.wiener_attack(n, e)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.p * result.q, n)
+
+    def test_rsa_findings_short_key(self):
+        findings = rsa.rsa_findings(3233, 17)
+        self.assertTrue(any("bits" in item for item in findings))
+
+    def test_parse_openssl_rsa_public(self):
+        sample = "Public-Key: (16 bit)\\nModulus:\\n    00:ca:01\\nExponent: 65537 (0x10001)\\n"
+        n, e = rsa.parse_openssl_rsa_public(sample)
+        self.assertEqual(n, 0xCA01)
+        self.assertEqual(e, 65537)
+
+
 if __name__ == "__main__":
     unittest.main()
