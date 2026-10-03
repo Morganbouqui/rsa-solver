@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""RSA Solver - educational RSA/CTF helper.
+
+Solves deliberately weak RSA exercises from n/e/c or known p/q/e/c.
+It does not claim to factor properly generated modern RSA keys.
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import multiprocessing as mp
+import os
+import secrets
+import sys
+import time
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
+class FactorResult:
+    p: int
+    q: int
+    method: str
+
+
+def parse_int(value: str) -> int:
+    value = value.strip().replace("_", "")
+    if not value:
+        raise ValueError("empty integer")
+    # Decimal by default; explicit 0x/0o/0b are accepted.
+    base = 0 if value.lower().startswith(("0x", "0o", "0b")) else 10
+    number = int(value, base)
+    if number < 0:
+        raise ValueError("RSA values must be non-negative")
+    return number
+
+
+def int_to_bytes(value: int, length: Optional[int] = None) -> bytes:
+    if value < 0:
+        raise ValueError("cannot encode a negative integer")
+    if length is None:
+        length = max(1, (value.bit_length() + 7) // 8)
+    return value.to_bytes(length, "big")
+
+
+def printable_text(data: bytes) -> Optional[str]:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if all(ch.isprintable() or ch in "\r\n\t" for ch in text):
+        return text
+    return None
+
+
+def strip_pkcs1_v15_encryption(block: bytes) -> Optional[bytes]:
+    # RSAES-PKCS1-v1_5 encoded message: 00 02 PS 00 M, PS >= 8 non-zero bytes.
+    if len(block) < 11 or not block.startswith(b"\x00\x02"):
+        return None
+    sep = block.find(b"\x00", 2)
+    if sep < 10:
+        return None
+    if any(b == 0 for b in block[2:sep]):
+        return None
+    return block[sep + 1 :]
+
+
+def decrypt_with_factors(p: int, q: int, e: int, c: int) -> dict:
+    for name, value in (("p", p), ("q", q), ("e", e)):
+        if value <= 1:
+            raise ValueError(f"{name} must be greater than 1")
+    n = p * q
+    if not (0 <= c < n):
+        raise ValueError("ciphertext c must satisfy 0 <= c < n")
+
+    # Correct Euler phi for p == q as well as ordinary p != q RSA.
+    phi = p * (p - 1) if p == q else (p - 1) * (q - 1)
+    if math.gcd(e, phi) != 1:
+        raise ValueError("e has no modular inverse modulo phi(n)")
+    d = pow(e, -1, phi)
+    m = pow(c, d, n)
+
+    raw_minimal = int_to_bytes(m)
+    modulus_len = max(1, (n.bit_length() + 7) // 8)
+    raw_block = int_to_bytes(m, modulus_len)
+    unpadded = strip_pkcs1_v15_encryption(raw_block)
+
+    return {
+        "n": n,
+        "phi": phi,
+        "d": d,
+        "m": m,
+        "raw": raw_minimal,
+        "block": raw_block,
+        "unpadded": unpadded,
+    }
+
+
+def _small_prime_factor(n: int, limit: int = 100_000) -> Optional[int]:
+    if n % 2 == 0:
+        return 2
+    d = 3
+    while d <= limit and d * d <= n:
+        if n % d == 0:
+            return d
+        d += 2
+    return None
+
+
+def fermat_factor(n: int, max_steps: int = 250_000) -> Optional[FactorResult]:
+    if n % 2 == 0:
+        return FactorResult(2, n // 2, "even modulus")
+    a = math.isqrt(n)
+    if a * a < n:
+        a += 1
+    for _ in range(max_steps):
+        b2 = a * a - n
+        b = math.isqrt(b2)
+        if b * b == b2:
+            p, q = a - b, a + b
+            if p > 1 and p * q == n:
+                return FactorResult(min(p, q), max(p, q), "Fermat")
+        a += 1
+    return None
+
+
+def pollard_rho(n: int, attempts: int = 12, iterations: int = 150_000) -> Optional[int]:
+    if n % 2 == 0:
+        return 2
+    if n % 3 == 0:
+        return 3
+    for attempt in range(attempts):
+        # Deterministic-ish constants make tests repeatable; x varies per attempt.
+        c = 1 + 2 * attempt
+        x = 2 + attempt
+        y = x
+        d = 1
+        for _ in range(iterations):
+            x = (x * x + c) % n
+            y = (y * y + c) % n
+            y = (y * y + c) % n
+            d = math.gcd(abs(x - y), n)
+            if d == 1:
+                continue
+            if d != n:
+                return d
+            break
+    return None
+
+
+def _sympy_worker(n: int, queue: mp.Queue) -> None:
+    try:
+        from sympy import factorint  # optional dependency
+        factors = factorint(n)
+        expanded = []
+        for prime, exponent in factors.items():
+            expanded.extend([int(prime)] * int(exponent))
+        queue.put(("ok", expanded))
+    except Exception as exc:
+        queue.put(("error", str(exc)))
+
+
+def sympy_factor_with_timeout(n: int, timeout: float) -> Optional[FactorResult]:
+    if timeout <= 0:
+        return None
+    queue: mp.Queue = mp.Queue()
+    proc = mp.Process(target=_sympy_worker, args=(n, queue), daemon=True)
+    proc.start()
+    proc.join(timeout)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        return None
+    if queue.empty():
+        return None
+    status, payload = queue.get()
+    if status != "ok" or len(payload) != 2:
+        return None
+    p, q = payload
+    if p * q != n:
+        return None
+    return FactorResult(min(p, q), max(p, q), "SymPy factorint")
+
+
+def factor_weak_modulus(
+    n: int,
+    fermat_steps: int = 250_000,
+    rho_attempts: int = 12,
+    rho_iterations: int = 150_000,
+    sympy_timeout: float = 20.0,
+) -> Optional[FactorResult]:
+    if n <= 3:
+        return None
+    f = _small_prime_factor(n)
+    if f:
+        return FactorResult(min(f, n // f), max(f, n // f), "small-prime trial division")
+
+    result = fermat_factor(n, fermat_steps)
+    if result:
+        return result
+
+    f = pollard_rho(n, rho_attempts, rho_iterations)
+    if f and 1 < f < n:
+        return FactorResult(min(f, n // f), max(f, n // f), "Pollard rho")
+
+    return sympy_factor_with_timeout(n, sympy_timeout)
+
+
+def show_plaintext(result: dict) -> None:
+    print(f"\n[+] Private exponent d : {result['d']}")
+    print(f"[+] Plaintext integer  : {result['m']}")
+    print(f"[+] Plaintext hex      : {result['raw'].hex()}")
+    print(f"[+] Plaintext bytes    : {result['raw']!r}")
+
+    text = printable_text(result["raw"])
+    if text is not None:
+        print(f"[+] Plaintext text     : {text}")
+    else:
+        print("[*] Minimal plaintext bytes are not clean UTF-8 text.")
+
+    if result["unpadded"] is not None:
+        data = result["unpadded"]
+        print("[+] PKCS#1 v1.5 block  : detected")
+        print(f"[+] Unpadded bytes     : {data!r}")
+        decoded = printable_text(data)
+        if decoded is not None:
+            print(f"[+] Unpadded text      : {decoded}")
+
+
+def solve_nec(n: int, e: int, c: int, sympy_timeout: float = 20.0) -> bool:
+    if n <= 3 or e <= 1:
+        raise ValueError("n must be > 3 and e must be > 1")
+    if not (0 <= c < n):
+        raise ValueError("ciphertext c must satisfy 0 <= c < n")
+
+    print(f"\n[*] n bits : {n.bit_length()}")
+    print("[*] Trying bounded weak-key factoring methods...")
+    started = time.monotonic()
+    factors = factor_weak_modulus(n, sympy_timeout=sympy_timeout)
+    elapsed = time.monotonic() - started
+
+    if factors is None:
+        print(f"[!] No factors found within the configured bounds ({elapsed:.1f}s).")
+        print("[*] This does NOT mean n is unfactorable.")
+        print("[*] Supply known p and q with option [2], or use a dedicated factoring tool.")
+        return False
+
+    print(f"[+] Factored with      : {factors.method}")
+    print(f"[+] p                  : {factors.p}")
+    print(f"[+] q                  : {factors.q}")
+    print(f"[+] Verified p * q == n: {factors.p * factors.q == n}")
+    result = decrypt_with_factors(factors.p, factors.q, e, c)
+    show_plaintext(result)
+    return True
+
+
+def inspect_values(n: int, e: Optional[int] = None, c: Optional[int] = None) -> None:
+    print("\n=== RSA INSPECTION ===")
+    print(f"n      : {n}")
+    print(f"n bits : {n.bit_length()}")
+    print(f"n odd  : {bool(n & 1)}")
+    if e is not None:
+        print(f"e      : {e}")
+        print(f"e common value : {e in (3, 17, 65537)}")
+    if c is not None:
+        print(f"c      : {c}")
+        print(f"c < n  : {c < n}")
+    root = math.isqrt(n)
+    print(f"is square : {root * root == n}")
+
+
+def read_integer(name: str, default: Optional[int] = None) -> int:
+    while True:
+        suffix = f" [{default}]" if default is not None else ""
+        raw = input(f"{name}{suffix} > ").strip()
+        if not raw and default is not None:
+            return default
+        try:
+            return parse_int(raw)
+        except ValueError as exc:
+            print(f"[!] Invalid {name}: {exc}")
+
+
+def interactive() -> int:
+    while True:
+        print("\n=== RSA CHALLENGE SOLVER ===\n")
+        print("[1] Solve from n, e, c")
+        print("[2] Solve from p, q, e, c")
+        print("[3] Inspect RSA values")
+        print("[0] Exit")
+        choice = input("\nRSA > ").strip()
+
+        try:
+            if choice == "1":
+                print("\n=== SOLVE FROM n, e, c ===\n")
+                n = read_integer("n")
+                e = read_integer("e", 65537)
+                c = read_integer("c")
+                solve_nec(n, e, c)
+                input("\nPress Enter to return...")
+            elif choice == "2":
+                print("\n=== SOLVE FROM p, q, e, c ===\n")
+                p = read_integer("p")
+                q = read_integer("q")
+                e = read_integer("e", 65537)
+                c = read_integer("c")
+                result = decrypt_with_factors(p, q, e, c)
+                print(f"\n[+] n                  : {result['n']}")
+                print("[+] Verified factors    : p * q == n")
+                show_plaintext(result)
+                input("\nPress Enter to return...")
+            elif choice == "3":
+                print("\n=== INSPECT RSA VALUES ===\n")
+                n = read_integer("n")
+                e = read_integer("e", 65537)
+                raw_c = input("c [optional] > ").strip()
+                c = parse_int(raw_c) if raw_c else None
+                inspect_values(n, e, c)
+                input("\nPress Enter to return...")
+            elif choice == "0":
+                return 0
+            else:
+                print("[!] Choose 0, 1, 2, or 3.")
+        except KeyboardInterrupt:
+            print("\n[!] Cancelled. Returning to menu.")
+        except (ValueError, OverflowError) as exc:
+            print(f"\n[!] {exc}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="rsa-solver",
+        description="Educational RSA/CTF solver for deliberately weak keys.",
+    )
+    parser.add_argument("--sympy-timeout", type=float, default=20.0,
+                        help="seconds allowed for optional SymPy factoring (default: 20)")
+    sub = parser.add_subparsers(dest="command")
+
+    nec = sub.add_parser("solve", help="factor weak n and decrypt c")
+    nec.add_argument("--n", required=True, type=parse_int)
+    nec.add_argument("--e", default=65537, type=parse_int)
+    nec.add_argument("--c", required=True, type=parse_int)
+
+    pq = sub.add_parser("solve-pq", help="decrypt when p and q are already known")
+    pq.add_argument("--p", required=True, type=parse_int)
+    pq.add_argument("--q", required=True, type=parse_int)
+    pq.add_argument("--e", default=65537, type=parse_int)
+    pq.add_argument("--c", required=True, type=parse_int)
+
+    ins = sub.add_parser("inspect", help="inspect RSA integer values")
+    ins.add_argument("--n", required=True, type=parse_int)
+    ins.add_argument("--e", type=parse_int)
+    ins.add_argument("--c", type=parse_int)
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "solve":
+            return 0 if solve_nec(args.n, args.e, args.c, args.sympy_timeout) else 2
+        if args.command == "solve-pq":
+            result = decrypt_with_factors(args.p, args.q, args.e, args.c)
+            show_plaintext(result)
+            return 0
+        if args.command == "inspect":
+            inspect_values(args.n, args.e, args.c)
+            return 0
+        return interactive()
+    except KeyboardInterrupt:
+        print("\n[!] Cancelled.", file=sys.stderr)
+        return 130
+    except (ValueError, OverflowError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
