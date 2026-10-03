@@ -1,12 +1,16 @@
+import importlib.machinery
 import importlib.util
 import pathlib
+import sys
 import unittest
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("rsa_solver", ROOT / "rsa-solver")
+LOADER = importlib.machinery.SourceFileLoader("rsa_solver", str(ROOT / "rsa-solver"))
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 rsa = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(rsa)
+sys.modules[SPEC.name] = rsa
+LOADER.exec_module(rsa)
 
 
 class RSASolverTests(unittest.TestCase):
