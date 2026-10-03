@@ -314,17 +314,36 @@ def run_openssl(args: list[str]) -> str:
 
 
 def parse_openssl_rsa_public(text: str) -> tuple[int, int]:
-    match = re.search(
-        r"Modulus:\\s*\\n(?P<body>(?:\\s*[0-9a-fA-F:]+\\s*\\n)+)\\s*Exponent:\\s*(?P<e>\\d+)",
-        text,
-        re.MULTILINE,
-    )
-    if not match:
+    """Extract n/e from the human-readable output of OpenSSL RSA commands."""
+    lines = text.splitlines()
+    modulus_lines = []
+    exponent = None
+    collecting = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "Modulus:":
+            collecting = True
+            continue
+        if collecting and stripped.startswith("Exponent:"):
+            match = re.search(r"Exponent:\s*(\d+)", stripped)
+            if match:
+                exponent = int(match.group(1))
+            break
+        if collecting:
+            if re.fullmatch(r"[0-9a-fA-F:]+", stripped):
+                modulus_lines.append(stripped)
+            elif stripped:
+                collecting = False
+
+    if not modulus_lines or exponent is None:
         raise ValueError("could not extract an RSA modulus/exponent from OpenSSL output")
-    hex_n = re.sub(r"[^0-9a-fA-F]", "", match.group("body"))
-    if hex_n.startswith("00"):
+
+    hex_n = "".join(modulus_lines).replace(":", "")
+    # OpenSSL commonly prefixes a positive ASN.1 INTEGER with 00.
+    if len(hex_n) > 2 and hex_n.startswith("00"):
         hex_n = hex_n[2:]
-    return int(hex_n, 16), int(match.group("e"))
+    return int(hex_n, 16), exponent
 
 
 def analyze_key_file(path: str, certificate: bool = False) -> tuple[int, int]:
