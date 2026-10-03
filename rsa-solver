@@ -184,6 +184,53 @@ def sympy_factor_with_timeout(n: int, timeout: float) -> Optional[FactorResult]:
     return FactorResult(min(p, q), max(p, q), "SymPy factorint")
 
 
+
+def parse_external_factors(text: str, n: int) -> Optional[FactorResult]:
+    """Parse candidate factors from YAFU/msieve output and verify them against n."""
+    candidates = set()
+    patterns = (
+        r"(?im)^\s*(?:p|prp)\d+\s*[=:]\s*(\d+)\s*$",
+        r"(?im)^\s*factor:\s*(\d+)\s*$",
+    )
+    for pattern in patterns:
+        for value in re.findall(pattern, text):
+            candidates.add(int(value))
+    for p in sorted(candidates):
+        if 1 < p < n and n % p == 0:
+            q = n // p
+            return FactorResult(min(p, q), max(p, q), "external factorer")
+    return None
+
+
+def external_factor(n: int, timeout: float = 300.0, backend: str = "auto") -> Optional[FactorResult]:
+    """Run an installed YAFU or msieve backend with a hard timeout."""
+    if timeout <= 0:
+        return None
+    choices = []
+    if backend in ("auto", "yafu") and shutil.which("yafu"):
+        choices.append(("YAFU", ["yafu", f"factor({n})", "-silent"]))
+    if backend in ("auto", "msieve") and shutil.which("msieve"):
+        choices.append(("msieve", ["msieve", "-q", str(n)]))
+    if backend not in ("auto", "yafu", "msieve"):
+        raise ValueError("factor backend must be auto, yafu, or msieve")
+    if not choices:
+        return None
+
+    for name, command in choices:
+        try:
+            proc = subprocess.run(
+                command, check=False, capture_output=True, text=True,
+                timeout=timeout, shell=False,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        result = parse_external_factors(proc.stdout + "\n" + proc.stderr, n)
+        if result:
+            result.method = name
+            return result
+    return None
+
+
 def factor_weak_modulus(
     n: int,
     fermat_steps: int = 250_000,
@@ -398,7 +445,8 @@ def show_plaintext(result: dict) -> None:
             print(f"[+] Unpadded text      : {decoded}")
 
 
-def solve_nec(n: int, e: int, c: int, sympy_timeout: float = 20.0) -> bool:
+def solve_nec(n: int, e: int, c: int, sympy_timeout: float = 20.0,
+              external_timeout: float = 0.0, factor_backend: str = "auto") -> bool:
     if n <= 3 or e <= 1:
         raise ValueError("n must be > 3 and e must be > 1")
     if not (0 <= c < n):
@@ -410,10 +458,18 @@ def solve_nec(n: int, e: int, c: int, sympy_timeout: float = 20.0) -> bool:
     factors = factor_weak_modulus(n, sympy_timeout=sympy_timeout)
     elapsed = time.monotonic() - started
 
+    if factors is None and external_timeout > 0:
+        available = [name for name in ("yafu", "msieve") if shutil.which(name)]
+        if available:
+            print(f"[*] Escalating to external factorer: {', '.join(available)}")
+            factors = external_factor(n, external_timeout, factor_backend)
+        else:
+            print("[*] External factoring requested, but YAFU/msieve is not installed.")
+
     if factors is None:
         print(f"[!] No factors found within the configured bounds ({elapsed:.1f}s).")
         print("[*] This does NOT mean n is unfactorable.")
-        print("[*] Supply known p and q with option [2], or use a dedicated factoring tool.")
+        print("[*] Install YAFU/msieve and use --external-timeout, or supply known p/q.")
         return False
 
     print(f"[+] Factored with      : {factors.method}")
@@ -549,6 +605,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--sympy-timeout", type=float, default=20.0,
                         help="seconds allowed for optional SymPy factoring (default: 20)")
+    parser.add_argument("--external-timeout", type=float, default=0.0,
+                        help="seconds allowed for installed YAFU/msieve; 0 disables escalation")
+    parser.add_argument("--factor-backend", choices=("auto", "yafu", "msieve"), default="auto",
+                        help="external factorer preference (default: auto)")
     sub = parser.add_subparsers(dest="command")
 
     nec = sub.add_parser("solve", help="factor weak n and decrypt c")
@@ -590,7 +650,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "solve":
-            return 0 if solve_nec(args.n, args.e, args.c, args.sympy_timeout) else 2
+            return 0 if solve_nec(args.n, args.e, args.c, args.sympy_timeout,
+                                  args.external_timeout, args.factor_backend) else 2
         if args.command == "solve-pq":
             result = decrypt_with_factors(args.p, args.q, args.e, args.c)
             show_plaintext(result)
