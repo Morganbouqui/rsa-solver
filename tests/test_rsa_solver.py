@@ -109,5 +109,25 @@ class RSASolverTests(unittest.TestCase):
         self.assertEqual(e, 65537)
 
 
+    def test_parse_yafu_factor_output(self):
+        n = 101 * 113
+        result = rsa.parse_external_factors("P3 = 101\nP3 = 113\n", n)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.p * result.q, n)
+
+    def test_parse_msieve_factor_output(self):
+        n = 101 * 113
+        result = rsa.parse_external_factors("p3: 101\np3: 113\n", n)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.p * result.q, n)
+
+    def test_external_factor_missing_backend_is_clean(self):
+        with mock.patch.object(rsa.shutil, "which", return_value=None):
+            self.assertIsNone(rsa.external_factor(101 * 113, timeout=1))
+
+    def test_external_factor_verifies_candidate(self):
+        self.assertIsNone(rsa.parse_external_factors("P2 = 99\n", 101 * 113))
+
+
 if __name__ == "__main__":
     unittest.main()
