@@ -129,5 +129,36 @@ class RSASolverTests(unittest.TestCase):
         self.assertIsNone(rsa.parse_external_factors("P2 = 99\n", 101 * 113))
 
 
+    def test_integer_nth_root(self):
+        self.assertEqual(rsa.integer_nth_root(27, 3), (3, True))
+        self.assertEqual(rsa.integer_nth_root(28, 3), (3, False))
+
+    def test_low_exponent_textbook_attack(self):
+        m = 42
+        self.assertEqual(rsa.low_exponent_textbook_attack(m ** 3, 3), m)
+        self.assertIsNone(rsa.low_exponent_textbook_attack(m ** 3 + 1, 3))
+
+    def test_common_modulus_attack(self):
+        p, q = 101, 113
+        n = p * q
+        m = 42
+        e1, e2 = 3, 7
+        c1, c2 = pow(m, e1, n), pow(m, e2, n)
+        self.assertEqual(rsa.common_modulus_attack(n, e1, c1, e2, c2), m)
+
+    def test_common_modulus_requires_coprime_exponents(self):
+        self.assertIsNone(rsa.common_modulus_attack(11413, 3, 1, 9, 1))
+
+    def test_hastad_broadcast_attack(self):
+        m, e = 42, 3
+        moduli = [101 * 113, 107 * 127, 109 * 131]
+        samples = [(n, pow(m, e, n)) for n in moduli]
+        self.assertEqual(rsa.hastad_broadcast_attack(samples, e), m)
+
+    def test_hastad_requires_enough_samples(self):
+        self.assertIsNone(rsa.hastad_broadcast_attack([(11413, 42)], 3))
+
+
+
 if __name__ == "__main__":
     unittest.main()

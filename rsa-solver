@@ -256,6 +256,104 @@ def factor_weak_modulus(
 
 
 
+
+def integer_nth_root(value: int, degree: int) -> tuple[int, bool]:
+    """Return floor(value ** (1/degree)) and whether the root is exact."""
+    if value < 0 or degree <= 0:
+        raise ValueError("value must be non-negative and degree positive")
+    if value in (0, 1) or degree == 1:
+        return value, True
+    low, high = 0, 1 << ((value.bit_length() + degree - 1) // degree)
+    while low + 1 < high:
+        mid = (low + high) // 2
+        power = pow(mid, degree)
+        if power == value:
+            return mid, True
+        if power < value:
+            low = mid
+        else:
+            high = mid
+    return low, pow(low, degree) == value
+
+
+def crt(congruences: list[tuple[int, int]]) -> tuple[int, int]:
+    """Chinese Remainder Theorem for pairwise-coprime moduli."""
+    if not congruences:
+        raise ValueError("provide at least one congruence")
+    modulus = 1
+    for _, n in congruences:
+        if n <= 1:
+            raise ValueError("CRT moduli must be greater than 1")
+        if math.gcd(modulus, n) != 1:
+            raise ValueError("CRT moduli must be pairwise coprime")
+        modulus *= n
+    total = 0
+    for residue, n in congruences:
+        part = modulus // n
+        total = (total + (residue % n) * part * pow(part, -1, n)) % modulus
+    return total, modulus
+
+
+def hastad_broadcast_attack(samples: list[tuple[int, int]], e: int) -> Optional[int]:
+    """Recover an unpadded message sent under the same small e to coprime moduli."""
+    if e <= 1:
+        raise ValueError("e must be greater than 1")
+    if len(samples) < e:
+        return None
+    combined, _ = crt([(c, n) for n, c in samples[:e]])
+    root, exact = integer_nth_root(combined, e)
+    return root if exact else None
+
+
+def common_modulus_attack(n: int, e1: int, c1: int, e2: int, c2: int) -> Optional[int]:
+    """Recover a textbook-RSA message when one modulus is reused with coprime exponents."""
+    if n <= 1 or min(e1, e2) <= 1:
+        raise ValueError("invalid RSA parameters")
+    g = math.gcd(e1, e2)
+    if g != 1:
+        return None
+
+    def egcd(a: int, b: int) -> tuple[int, int, int]:
+        if b == 0:
+            return a, 1, 0
+        d, x1, y1 = egcd(b, a % b)
+        return d, y1, x1 - (a // b) * y1
+
+    _, a, b = egcd(e1, e2)
+
+    def signed_pow(base: int, exponent: int) -> int:
+        if exponent < 0:
+            try:
+                base = pow(base, -1, n)
+            except ValueError:
+                return -1
+            exponent = -exponent
+        return pow(base, exponent, n)
+
+    left, right = signed_pow(c1, a), signed_pow(c2, b)
+    if left < 0 or right < 0:
+        return None
+    return (left * right) % n
+
+
+def low_exponent_textbook_attack(c: int, e: int) -> Optional[int]:
+    """Recover m when textbook RSA has no padding and m**e is smaller than n."""
+    if c < 0 or e <= 1:
+        raise ValueError("invalid ciphertext/exponent")
+    root, exact = integer_nth_root(c, e)
+    return root if exact else None
+
+
+def show_recovered_message(m: int) -> None:
+    data = int_to_bytes(m)
+    print(f"[+] Plaintext integer  : {m}")
+    print(f"[+] Plaintext hex      : {data.hex()}")
+    print(f"[+] Plaintext bytes    : {data!r}")
+    decoded = printable_text(data)
+    if decoded is not None:
+        print(f"[+] Plaintext text     : {decoded}")
+
+
 def continued_fraction(numerator: int, denominator: int):
     while denominator:
         a = numerator // denominator
@@ -520,6 +618,9 @@ def interactive() -> int:
         print("[7] Analyze RSA public key PEM")
         print("[8] Analyze X.509 certificate RSA key")
         print("[9] Batch-assess multiple RSA moduli")
+        print("[10] Test common-modulus attack")
+        print("[11] Test Hastad broadcast attack")
+        print("[12] Test textbook low-exponent attack")
         print("[0] Exit")
         choice = input("\nRSA > ").strip()
 
@@ -596,10 +697,50 @@ def interactive() -> int:
                 for i, j, g in shared_prime_gcd(moduli):
                     print(f"[!] CONFIRMED shared factor n[{i}] / n[{j}]: {g}")
                 input("\\nPress Enter to return...")
+            elif choice == "10":
+                print("\n=== COMMON MODULUS ATTACK ===\n")
+                n = read_integer("n")
+                e1 = read_integer("e1")
+                c1 = read_integer("c1")
+                e2 = read_integer("e2")
+                c2 = read_integer("c2")
+                m = common_modulus_attack(n, e1, c1, e2, c2)
+                if m is None:
+                    print("[*] Conditions not met or message could not be recovered.")
+                else:
+                    print("[!] CONFIRMED common-modulus recovery")
+                    show_recovered_message(m)
+                input("\nPress Enter to return...")
+            elif choice == "11":
+                print("\n=== HASTAD BROADCAST ATTACK ===\n")
+                e = read_integer("e", 3)
+                count = read_integer("number of samples")
+                samples = []
+                for idx in range(count):
+                    print(f"--- sample {idx + 1} ---")
+                    samples.append((read_integer("n"), read_integer("c")))
+                m = hastad_broadcast_attack(samples, e)
+                if m is None:
+                    print("[*] Conditions not met or exact plaintext root not recovered.")
+                else:
+                    print("[!] CONFIRMED broadcast recovery")
+                    show_recovered_message(m)
+                input("\nPress Enter to return...")
+            elif choice == "12":
+                print("\n=== TEXTBOOK LOW-EXPONENT ATTACK ===\n")
+                e = read_integer("e", 3)
+                c = read_integer("c")
+                m = low_exponent_textbook_attack(c, e)
+                if m is None:
+                    print("[*] Ciphertext is not an exact e-th power.")
+                else:
+                    print("[!] CONFIRMED unpadded low-exponent recovery")
+                    show_recovered_message(m)
+                input("\nPress Enter to return...")
             elif choice == "0":
                 return 0
             else:
-                print("[!] Choose a menu option from 0 through 9.")
+                print("[!] Choose a menu option from 0 through 12.")
         except KeyboardInterrupt:
             print("\n[!] Cancelled. Returning to menu.")
         except (ValueError, OverflowError) as exc:
@@ -650,6 +791,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     batch = sub.add_parser("batch", help="batch-assess moduli and test shared factors")
     batch.add_argument("moduli", nargs="+", type=parse_int)
+
+    common = sub.add_parser("common-modulus", help="recover textbook RSA reused under one modulus")
+    common.add_argument("--n", required=True, type=parse_int)
+    common.add_argument("--e1", required=True, type=parse_int)
+    common.add_argument("--c1", required=True, type=parse_int)
+    common.add_argument("--e2", required=True, type=parse_int)
+    common.add_argument("--c2", required=True, type=parse_int)
+
+    broadcast = sub.add_parser("broadcast", help="Hastad broadcast recovery for textbook RSA")
+    broadcast.add_argument("--e", default=3, type=parse_int)
+    broadcast.add_argument("pairs", nargs="+", help="n:c samples")
+
+    lowe = sub.add_parser("low-e", help="recover an exact unpadded low-exponent plaintext")
+    lowe.add_argument("--e", default=3, type=parse_int)
+    lowe.add_argument("--c", required=True, type=parse_int)
     return parser
 
 
@@ -700,6 +856,33 @@ def main(argv=None) -> int:
                 show_assessment(modulus)
             for i, j, g in shared_prime_gcd(args.moduli):
                 print(f"[!] CONFIRMED shared factor n[{i}] / n[{j}]: {g}")
+            return 0
+        if args.command == "common-modulus":
+            m = common_modulus_attack(args.n, args.e1, args.c1, args.e2, args.c2)
+            if m is None:
+                print("[*] Conditions not met or message could not be recovered.")
+                return 2
+            show_recovered_message(m)
+            return 0
+        if args.command == "broadcast":
+            samples = []
+            for pair in args.pairs:
+                if ":" not in pair:
+                    raise ValueError("broadcast samples must use n:c format")
+                n_raw, c_raw = pair.split(":", 1)
+                samples.append((parse_int(n_raw), parse_int(c_raw)))
+            m = hastad_broadcast_attack(samples, args.e)
+            if m is None:
+                print("[*] Conditions not met or exact plaintext root not recovered.")
+                return 2
+            show_recovered_message(m)
+            return 0
+        if args.command == "low-e":
+            m = low_exponent_textbook_attack(args.c, args.e)
+            if m is None:
+                print("[*] Ciphertext is not an exact e-th power.")
+                return 2
+            show_recovered_message(m)
             return 0
         return interactive()
     except KeyboardInterrupt:
