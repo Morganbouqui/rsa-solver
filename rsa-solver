@@ -529,7 +529,15 @@ def interactive() -> int:
                 n = read_integer("n")
                 e = read_integer("e", 65537)
                 c = read_integer("c")
-                solve_nec(n, e, c)
+                # Interactive mode should be the simple everyday interface:
+                # use an installed external factorer automatically after bounded
+                # built-in methods fail, without requiring CLI-only flags.
+                available = [name for name in ("yafu", "msieve") if shutil.which(name)]
+                if available:
+                    print(f"[*] External factoring available: {', '.join(available)}")
+                    solve_nec(n, e, c, external_timeout=300.0, factor_backend="auto")
+                else:
+                    solve_nec(n, e, c)
                 input("\nPress Enter to return...")
             elif choice == "2":
                 print("\n=== SOLVE FROM p, q, e, c ===\n")
