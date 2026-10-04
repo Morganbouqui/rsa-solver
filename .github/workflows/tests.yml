@@ -2,7 +2,7 @@ name: tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/final-rsa-toolkit]
   pull_request:
 
 jobs:
