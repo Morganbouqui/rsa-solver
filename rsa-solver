@@ -606,6 +606,68 @@ def read_integer(name: str, default: Optional[int] = None) -> int:
             print(f"[!] Invalid {name}: {exc}")
 
 
+def show_usage_guide() -> None:
+    """Explain when each interactive RSA workflow is appropriate."""
+    print("""
+=== WHEN TO USE EACH RSA OPTION ===
+
+[1] Solve from n, e, c
+    Use when a challenge gives only the public modulus n, exponent e, and
+    ciphertext c. The tool tries bounded weak-key factoring and can escalate
+    to an installed YAFU/msieve backend. Best for intentionally weak lab/CTF keys.
+
+[2] Solve from p, q, e, c
+    Use when you already know the prime factors p and q. This is the fastest
+    path to derive d and decrypt c.
+
+[3] Inspect / assess RSA values
+    Use for a quick, non-factoring review of n/e (and optional c): key size,
+    suspicious parameters, and basic structural observations.
+
+[4] Wiener weak-private-exponent attack
+    Use when you have n and e and suspect the private exponent d was chosen
+    unusually small. It does not require ciphertext.
+
+[5] Fermat close-prime weakness
+    Use when you suspect p and q are very close together. It performs a bounded
+    Fermat factorization attempt against n.
+
+[6] Shared-prime GCD across moduli
+    Use when you have two or more RSA moduli. It detects keys that accidentally
+    reused a prime factor, a serious key-generation failure.
+
+[7] Analyze RSA public key PEM
+    Use when your input is a PEM public-key file instead of raw integers.
+    The tool extracts n/e with OpenSSL and assesses them.
+
+[8] Analyze X.509 certificate RSA key
+    Use when the RSA public key is inside a certificate. The tool extracts and
+    assesses the certificate's RSA n/e values.
+
+[9] Batch-assess multiple RSA moduli
+    Use when reviewing many moduli at once. It performs basic assessment and
+    also checks the set for shared prime factors.
+
+[10] Common-modulus attack
+    Use when the SAME plaintext was encrypted with the SAME modulus n but two
+    different coprime public exponents, giving (e1,c1) and (e2,c2).
+
+[11] Hastad broadcast attack
+    Use when the SAME unpadded plaintext was encrypted to multiple recipients
+    with the same small exponent (commonly e=3) and pairwise-coprime moduli.
+    For e=3, normally provide at least three (n,c) samples.
+
+[12] Textbook low-exponent attack
+    Use when textbook/unpadded RSA uses a small exponent and c is an exact
+    e-th power because m^e did not wrap modulo n. Common lab case: e=3.
+
+Notes:
+  - Failed attack checks do not prove an RSA key is secure.
+  - Options 10-12 target textbook RSA misuse, not correctly padded modern RSA.
+  - Use key-recovery operations only for CTFs, labs, or explicitly authorized keys.
+""")
+
+
 def interactive() -> int:
     while True:
         print("\n=== RSA CHALLENGE SOLVER ===\n")
@@ -621,6 +683,7 @@ def interactive() -> int:
         print("[10] Test common-modulus attack")
         print("[11] Test Hastad broadcast attack")
         print("[12] Test textbook low-exponent attack")
+        print("[13] When to use each option")
         print("[0] Exit")
         choice = input("\nRSA > ").strip()
 
@@ -737,10 +800,13 @@ def interactive() -> int:
                     print("[!] CONFIRMED unpadded low-exponent recovery")
                     show_recovered_message(m)
                 input("\nPress Enter to return...")
+            elif choice == "13":
+                show_usage_guide()
+                input("\nPress Enter to return...")
             elif choice == "0":
                 return 0
             else:
-                print("[!] Choose a menu option from 0 through 12.")
+                print("[!] Choose a menu option from 0 through 13.")
         except KeyboardInterrupt:
             print("\n[!] Cancelled. Returning to menu.")
         except (ValueError, OverflowError) as exc:

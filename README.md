@@ -59,9 +59,39 @@ rsa-solver
 
 [1] Solve from n, e, c
 [2] Solve from p, q, e, c
-[3] Inspect RSA values
+[3] Inspect / assess RSA values
+[4] Test Wiener weak-private-exponent attack
+[5] Test Fermat close-prime weakness
+[6] Test shared-prime GCD across moduli
+[7] Analyze RSA public key PEM
+[8] Analyze X.509 certificate RSA key
+[9] Batch-assess multiple RSA moduli
+[10] Test common-modulus attack
+[11] Test Hastad broadcast attack
+[12] Test textbook low-exponent attack
+[13] When to use each option
 [0] Exit
 ```
+
+## When to use each menu option
+
+| Option | Use it when... |
+| --- | --- |
+| **1 — Solve from n, e, c** | A lab/CTF gives only the public modulus, public exponent, and ciphertext. The solver tries bounded weak-key factoring and can use an installed YAFU/msieve backend. |
+| **2 — Solve from p, q, e, c** | You already recovered or were given both prime factors. Use this to derive the private exponent and decrypt immediately. |
+| **3 — Inspect / assess RSA values** | You want a quick review of RSA parameters without launching factorization. Useful for key size and structural observations. |
+| **4 — Wiener attack** | You have n and e and suspect the private exponent d is unusually small. No ciphertext is required. |
+| **5 — Fermat close-prime weakness** | You suspect p and q were generated too close together. The test performs a bounded Fermat factorization attempt. |
+| **6 — Shared-prime GCD** | You have two or more RSA moduli and want to detect accidental prime reuse between keys. |
+| **7 — RSA public key PEM** | Your target material is a PEM public-key file rather than raw n/e integers. OpenSSL is used to extract and assess the RSA parameters. |
+| **8 — X.509 certificate RSA key** | The RSA public key is embedded in an X.509 certificate and you want to extract and assess it. |
+| **9 — Batch-assess moduli** | You have many RSA moduli. This combines basic assessment with shared-prime checks across the set. |
+| **10 — Common-modulus attack** | The same plaintext was encrypted with the same modulus n under two different coprime public exponents, producing (e1,c1) and (e2,c2). |
+| **11 — Hastad broadcast attack** | The same unpadded plaintext was sent to multiple recipients using the same small exponent (commonly e=3) and pairwise-coprime moduli. For e=3, normally provide at least three samples. |
+| **12 — Textbook low-exponent attack** | Unpadded/textbook RSA used a small exponent and the ciphertext is an exact e-th power because m^e did not wrap modulo n. |
+| **13 — When to use each option** | You are unsure which workflow matches the RSA values/files you have. This displays the guide directly inside the interactive tool. |
+
+A failed attack check does **not** prove that an RSA key is secure. Options 10–12 specifically target textbook RSA misuse and are not expected to break correctly padded modern RSA. Key-recovery operations are intended for CTFs, labs, and explicitly authorized assessments.
 
 ### 1. Solve from n, e, c
 
