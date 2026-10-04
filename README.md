@@ -16,7 +16,11 @@ It can:
 - detect shared prime factors across multiple RSA moduli with pairwise GCD;
 - explicitly test close-prime/Fermat weakness;
 - analyze RSA public-key PEM files and X.509 certificates through OpenSSL;
-- batch-assess multiple moduli and separate observations from confirmed key-recovery findings.
+- batch-assess multiple moduli and separate observations from confirmed key-recovery findings;
+- recover vulnerable textbook RSA with the common-modulus attack;
+- test Hastad's small-exponent broadcast condition across multiple coprime moduli;
+- recover exact unpadded low-exponent ciphertexts when `c = m^e` without modular wraparound;
+- escalate interactive weak-modulus solving to an installed YAFU/msieve backend.
 
 ## Install on Ubuntu
 
@@ -83,7 +87,7 @@ Displays modulus size and basic structural information. Inspection does not laun
 ```bash
 rsa-solver solve --n 3233 --e 17 --c 2790
 rsa-solver solve-pq --p 61 --q 53 --e 17 --c 2790
-rsa-solver inspect --n 3233 --e 17 --c 2790\nrsa-solver wiener --n ... --e ...\nrsa-solver shared-gcd <n1> <n2> <n3>\nrsa-solver key public.pem\nrsa-solver cert server.crt\nrsa-solver batch <n1> <n2> <n3>
+rsa-solver inspect --n 3233 --e 17 --c 2790\nrsa-solver wiener --n ... --e ...\nrsa-solver shared-gcd <n1> <n2> <n3>\nrsa-solver key public.pem\nrsa-solver cert server.crt\nrsa-solver batch <n1> <n2> <n3>\nrsa-solver common-modulus --n ... --e1 ... --c1 ... --e2 ... --c2 ...\nrsa-solver broadcast --e 3 <n1>:<c1> <n2>:<c2> <n3>:<c3>\nrsa-solver low-e --e 3 --c ...
 ```
 
 For `solve`, the optional SymPy fallback defaults to 20 seconds:
@@ -119,3 +123,14 @@ The unit tests use small fixtures and do not perform expensive factorization.
 ## Scope
 
 This project is intended for cryptography education, CTFs, and authorized security assessments. Public-key/certificate analysis is passive. Factoring and private-key recovery should only be used for keys that are explicitly in assessment scope.\n\nThe toolkit does not imply that correctly generated modern RSA is practically factorable. Its real-world value is detecting weak generation and configuration: undersized moduli, close primes, shared primes, unusually small private exponents, suspicious parameters, and recoverable challenge/test keys. It is not a replacement for dedicated number-field-sieve factoring software.
+
+
+## Textbook RSA recovery checks
+
+The additional recovery commands target specific RSA misuse rather than properly padded modern RSA:
+
+- `common-modulus`: same modulus and same plaintext encrypted under two coprime public exponents.
+- `broadcast`: the same unpadded plaintext sent under a small exponent (commonly e=3) to enough pairwise-coprime moduli.
+- `low-e`: an unpadded ciphertext that is an exact e-th power before modular reduction.
+
+A failed check is reported as a failed condition, not as proof that a key is secure. These attacks are intended for CTFs, labs, and explicitly authorized assessments.
